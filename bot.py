@@ -17,13 +17,11 @@ from aiogram.types import (
     BufferedInputFile, LabeledPrice, PreCheckoutQuery, Message
 )
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 import aiosqlite
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-# ==========================================
-# КОНФИГУРАЦИЯ И КОНСТАНТЫ
-# ==========================================
 BOT_TOKEN = "8949953502:AAGwrEWWVST3yXRNA57yLWl8RXDdmr9WRQs"  # Замените при необходимости
 ADMIN_IDS = [5341904332]  # Список ID администраторов
 
@@ -50,7 +48,6 @@ MUTATIONS = {
     "Rainbow": {"chance": 0.02, "buff": 1.30, "name": "🌈 Радужная"}
 }
 
-# Геймпассы и цены
 GAMEPASSES = {
     "x2_shekels": {
         "title": "⚡️ X2 Шекели",
@@ -72,13 +69,12 @@ GAMEPASSES = {
     },
     "vip": {
         "title": "👑 VIP Статус",
-        "desc": "x1.5 Шекели, x1.3 Удача удачных карт, +5% к Очкам навыков и специальный VIP значок!",
+        "desc": "x1.5 Шекели, x1.3 Удача карт, +5% к Очкам навыков, 4 слота в AFK режимах и специальный значок!",
         "robux": 159,
         "stars": 79
     }
 }
 
-# Ранги и награды
 RANKS = {
     "Rock I": {"min": 0, "max": 150, "trophies": (60, 80), "shekels": (2, 4)},
     "Rock II": {"min": 151, "max": 350, "trophies": (55, 70), "shekels": (4, 4)},
@@ -119,15 +115,11 @@ RANKS = {
     "Ultimate I": {"min": 50001, "max": 9999999, "trophies": (1, 1), "shekels": (70, 100)}
 }
 
-# ==========================================
-# ИНИЦИАЛИЗАЦИЯ БОТА И БД
-# ==========================================
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # Таблица пользователей
         await db.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
@@ -144,21 +136,6 @@ async def init_db():
             last_daily_claim TEXT DEFAULT ''
         )''')
 
-        # Миграция колонок если таблица уже существовала
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN robux INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN daily_streak INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN last_daily_claim TEXT DEFAULT ''")
-        except Exception:
-            pass
-
-        # Таблица карт
         await db.execute('''CREATE TABLE IF NOT EXISTS cards (
             card_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
@@ -172,7 +149,6 @@ async def init_db():
             is_hidden_index INTEGER DEFAULT 0
         )''')
 
-        # Инвентарь
         await db.execute('''CREATE TABLE IF NOT EXISTS inventory (
             item_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -186,37 +162,27 @@ async def init_db():
             equip_slot INTEGER DEFAULT 0
         )''')
 
-        # Сундуки / Крейты
-        await db.execute('''CREATE TABLE IF NOT EXISTS crates (
-            crate_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            price INTEGER,
-            photo_id TEXT,
-            contents TEXT
-        )''')
-
-        # Навыки
         await db.execute('''CREATE TABLE IF NOT EXISTS skills (
             user_id INTEGER PRIMARY KEY,
             points INTEGER DEFAULT 0
         )''')
 
-        # Покупки / Геймпассы
         await db.execute('''CREATE TABLE IF NOT EXISTS user_gamepasses (
             user_id INTEGER,
             gamepass_id TEXT,
             PRIMARY KEY (user_id, gamepass_id)
         )''')
 
-        # Ивенты
-        await db.execute('''CREATE TABLE IF NOT EXISTS global_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT,
-            multiplier REAL,
-            end_time TEXT
+        # Таблица для AFK экспедиций
+        await db.execute('''CREATE TABLE IF NOT EXISTS afk_expeditions (
+            user_id INTEGER PRIMARY KEY,
+            cards_json TEXT,
+            duration_hours INTEGER,
+            start_time TEXT,
+            end_time TEXT,
+            claimed INTEGER DEFAULT 0
         )''')
 
-        # Добавим стартовую карту, если база полностью пустая
         async with db.execute("SELECT COUNT(*) FROM cards") as cursor:
             count = (await cursor.fetchone())[0]
             if count == 0:
@@ -227,9 +193,6 @@ async def init_db():
 
         await db.commit()
 
-# ==========================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (УТИЛИТЫ)
-# ==========================================
 def get_rank_by_trophies(trophies: int) -> str:
     for rank, data in RANKS.items():
         if data["min"] <= trophies <= data["max"]:
@@ -261,7 +224,6 @@ async def give_gamepass(user_id: int, gamepass_id: str) -> bool:
             return False
 
 async def add_card_to_user(user_id: int, rarity_filter: str = None) -> tuple:
-    """Выдает пользователю карту случайным образом с учетом редких мутаций и уникальных серийных номеров."""
     async with aiosqlite.connect(DB_PATH) as db:
         query = "SELECT card_id, name, rarity FROM cards"
         params = []
@@ -274,7 +236,6 @@ async def add_card_to_user(user_id: int, rarity_filter: str = None) -> tuple:
             card = await cursor.fetchone()
 
         if not card:
-            # Резервный поиск любой карты
             async with db.execute("SELECT card_id, name, rarity FROM cards ORDER BY RANDOM() LIMIT 1") as cursor2:
                 card = await cursor2.fetchone()
 
@@ -283,7 +244,6 @@ async def add_card_to_user(user_id: int, rarity_filter: str = None) -> tuple:
 
         card_id, card_name, rarity = card
 
-        # Определение мутации
         rand = random.random()
         if rand < MUTATIONS["Rainbow"]["chance"]:
             mutation = "Rainbow"
@@ -292,10 +252,8 @@ async def add_card_to_user(user_id: int, rarity_filter: str = None) -> tuple:
         else:
             mutation = "Normal"
 
-        # Серийный номер
         serial = await get_next_serial(rarity)
 
-        # Добавление в инвентарь
         await db.execute(
             "INSERT INTO inventory (user_id, card_id, mutation, serial_number) VALUES (?, ?, ?, ?)",
             (user_id, card_id, mutation, serial)
@@ -314,24 +272,7 @@ async def get_next_serial(rarity: str):
                 serial = 9999
             return f"#{serial:04d}"
 
-# ==========================================
-# ГРАФИЧЕСКИЕ ДИЗАЙНЕРЫ (PIL)
-# ==========================================
-def generate_card_frame(photo_bytes: bytes, rarity: str) -> bytes:
-    """Накладывает цветную рамку на фото карты в зависимости от редкости."""
-    try:
-        img = Image.open(BytesIO(photo_bytes)).convert("RGBA")
-        color = RARITY_COLORS.get(rarity, (255, 255, 255))
-        img_with_border = ImageOps.expand(img, border=15, fill=color)
-        out = BytesIO()
-        img_with_border.save(out, format="JPEG")
-        return out.getvalue()
-    except Exception as e:
-        logging.error(f"Error generating frame: {e}")
-        return photo_bytes
-
 def generate_skill_panel(hp_pts: int, dmg_pts: int, cld_pts: int, available_pts: int, card_name: str = "Карта") -> bytes:
-    """Генерирует стильный интерфейс прокачки очков навыков."""
     width, height = 550, 320
     img = Image.new('RGB', (width, height), color=(24, 28, 36))
     draw = ImageDraw.Draw(img)
@@ -345,10 +286,7 @@ def generate_skill_panel(hp_pts: int, dmg_pts: int, cld_pts: int, available_pts:
         font_medium = ImageFont.load_default()
         font_small = ImageFont.load_default()
 
-    # Внешний контур
     draw.rectangle([10, 10, width-10, height-10], outline=(255, 140, 0), width=3)
-
-    # Заголовок
     draw.text((30, 20), f"⚡️ ПРОКАЧКА: {card_name[:20]}", fill=(255, 200, 50), font=font_large)
     draw.text((30, 55), f"Свободных очков навыков: {available_pts}", fill=(50, 255, 150), font=font_medium)
 
@@ -360,16 +298,9 @@ def generate_skill_panel(hp_pts: int, dmg_pts: int, cld_pts: int, available_pts:
 
     for name, pts, color, y in stats:
         draw.text((30, y), name, fill=color, font=font_medium)
-        
-        # Расчет эффекта
-        if "CLD" in name:
-            bonus = f"-{pts * 5}% кд"
-        else:
-            bonus = f"+{pts * 5}% стат"
-
+        bonus = f"-{pts * 5}% кд" if "CLD" in name else f"+{pts * 5}% стат"
         draw.text((250, y), bonus, fill=(220, 220, 220), font=font_small)
 
-        # Прогресс бар
         bar_x = 350
         draw.rectangle([bar_x, y + 2, bar_x + 120, y + 18], fill=(40, 45, 55), outline=(100, 100, 110))
         fill_w = int(120 * (pts / 100.0))
@@ -382,9 +313,6 @@ def generate_skill_panel(hp_pts: int, dmg_pts: int, cld_pts: int, available_pts:
     img.save(out, format="JPEG")
     return out.getvalue()
 
-# ==========================================
-# МАШИНА СОСТОЯНИЙ (FSM)
-# ==========================================
 class CardCreation(StatesGroup):
     photo = State()
     name = State()
@@ -393,7 +321,6 @@ class CardCreation(StatesGroup):
     damage = State()
     hp = State()
     cooldown = State()
-    confirm = State()
 
 class ExchangeState(StatesGroup):
     amount = State()
@@ -403,14 +330,14 @@ class GiftState(StatesGroup):
     currency_type = State()
     target_user = State()
 
-# ==========================================
-# КЛАВИАТУРЫ
-# ==========================================
+class AFKState(StatesGroup):
+    selecting_cards = State()
+
 def main_menu_kb(is_admin=False):
     kb = [
         [InlineKeyboardButton(text="🎁 Ежедневные награды", callback_data="menu_daily"), InlineKeyboardButton(text="💎 Донат Магазин", callback_data="menu_donate")],
-        [InlineKeyboardButton(text="📦 Крейты", callback_data="menu_crates"), InlineKeyboardButton(text="⚔️ Поиск боя", callback_data="menu_battle")],
-        [InlineKeyboardButton(text="📜 Квесты", callback_data="menu_quests"), InlineKeyboardButton(text="🏆 Топ игроков", callback_data="menu_top")],
+        [InlineKeyboardButton(text="⏳ AFK Экспедиция", callback_data="menu_afk"), InlineKeyboardButton(text="⚔️ Поиск боя", callback_data="menu_battle")],
+        [InlineKeyboardButton(text="📦 Крейты", callback_data="menu_crates"), InlineKeyboardButton(text="🏆 Топ игроков", callback_data="menu_top")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="menu_profile"), InlineKeyboardButton(text="✨ Очки навыков", callback_data="menu_skills")],
         [InlineKeyboardButton(text="🎒 Инвентарь", callback_data="menu_inventory"), InlineKeyboardButton(text="📖 Индекс", callback_data="menu_index")],
         [InlineKeyboardButton(text="🛡 Экипировка", callback_data="menu_equip")]
@@ -430,7 +357,6 @@ def donate_main_kb():
 def admin_panel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🃏 Карты", callback_data="admin_cards"), InlineKeyboardButton(text="👥 Игроки", callback_data="admin_players")],
-        [InlineKeyboardButton(text="🎉 Ивенты", callback_data="admin_events"), InlineKeyboardButton(text="💾 Бекап БД", callback_data="admin_backup")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")]
     ])
 
@@ -443,9 +369,6 @@ def battle_difficulty_kb():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")]
     ])
 
-# ==========================================
-# ОБРАБОТЧИКИ КОМАНД И ГЛАВНОГО МЕНЮ
-# ==========================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -460,12 +383,12 @@ async def cmd_start(message: types.Message):
 
         async with db.execute("SELECT is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
             res = await cursor.fetchone()
-            is_admin = bool(res[0]) if res else False or (user_id in ADMIN_IDS)
+            is_admin = bool(res[0]) if res else (user_id in ADMIN_IDS)
 
     text = (
         f"👋 Привет, <b>{username}</b>!\n\n"
         f"Добро пожаловать в карточную арену <b>Card Battle Bot</b>!\n"
-        f"Собирайте редкие карты, прокачивайте навыки, выполняйте ежедневные задания и сражайтесь на арене!"
+        f"Собирайте редкие карты, прокачивайте навыки, отправляйте отряды в AFK-экспедиции и сражайтесь на арене!"
     )
     await message.answer(text, reply_markup=main_menu_kb(is_admin))
 
@@ -475,7 +398,7 @@ async def cb_menu_main(callback: CallbackQuery):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT is_admin FROM users WHERE user_id = ?", (user_id,)) as cursor:
             res = await cursor.fetchone()
-            is_admin = bool(res[0]) if res else False or (user_id in ADMIN_IDS)
+            is_admin = bool(res[0]) if res else (user_id in ADMIN_IDS)
     await callback.message.edit_text("Главное меню:", reply_markup=main_menu_kb(is_admin))
 
 @dp.callback_query(F.data == "menu_profile")
@@ -488,14 +411,13 @@ async def cb_profile(callback: CallbackQuery):
     shekels, robux, trophies, pity_m, pity_s, username, streak, _ = stats
     rank = get_rank_by_trophies(trophies)
 
-    # Проверка VIP и 5-го слота
     is_vip = await has_gamepass(user_id, "vip")
     has_slot5 = await has_gamepass(user_id, "slot_5")
     max_slots = 5 if has_slot5 else 4
+    afk_slots = 4 if is_vip else 3
 
     vip_badge = "👑 [VIP Игрок] " if is_vip else ""
 
-    # Экипированные карты
     equipped_text = ""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("""
@@ -518,7 +440,7 @@ async def cb_profile(callback: CallbackQuery):
         f"🪙 <b>Шекели:</b> {shekels}\n"
         f"💎 <b>Робуксы (R$):</b> {robux}\n"
         f"🔥 <b>Серия входа:</b> {streak} дней\n"
-        f"⚔️ <b>Доступно слотов юнитов:</b> {max_slots}\n"
+        f"⚔️ <b>Слотов юнитов:</b> {max_slots} | ⏳ <b>AFK слотов:</b> {afk_slots}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔮 <b>Гарант Мифик:</b> {pity_m}/1000\n"
         f"🌈 <b>Гарант Супер:</b> {pity_s}/10000\n"
@@ -528,17 +450,14 @@ async def cb_profile(callback: CallbackQuery):
 
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")]]))
 
-# ==========================================
-# ЕЖЕДНЕВНЫЕ НАГРАДЫ (DAILY REWARDS)
-# ==========================================
 DAILY_REWARDS_INFO = {
     1: {"type": "shekels", "amount": 10, "desc": "10 шекелей 🪙"},
-    2: {"type": "card", "rarity": "Uncommon", "desc": "Гарантированный Uncommon юнита 🟢"},
-    3: {"type": "card", "rarity": "Epic", "desc": "Гарантированный Epic юнита 🟣"},
+    2: {"type": "card", "rarity": "Uncommon", "desc": "Гарантированный Uncommon юнит 🟢"},
+    3: {"type": "card", "rarity": "Epic", "desc": "Гарантированный Epic юнит 🟣"},
     4: {"type": "shekels", "amount": 400, "desc": "400 шекелей 🪙"},
-    5: {"type": "card", "rarity": "Legendary", "desc": "Гарантированный Legendary юнита 🟡"},
+    5: {"type": "card", "rarity": "Legendary", "desc": "Гарантированный Legendary юнит 🟡"},
     6: {"type": "shekels", "amount": 700, "desc": "700 шекелей 🪙"},
-    7: {"type": "card", "rarity": "Mythic", "desc": "Гарантированный Mythic юнита 🔴"}
+    7: {"type": "card", "rarity": "Mythic", "desc": "Гарантированный Mythic юнит 🔴"}
 }
 
 @dp.callback_query(F.data == "menu_daily")
@@ -565,8 +484,7 @@ async def cb_daily_menu(callback: CallbackQuery):
     text = "🎁 <b>ЕЖЕДНЕВНЫЕ НАГРАДЫ</b>\nЗаходите каждый день и получайте ценные призы!\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
     for day in range(1, 8):
         reward = DAILY_REWARDS_INFO[day]
-        mark = "▶️ " if (can_claim and ((last_claim_str == yesterday_str and day == (streak % 7) + 1) or (last_claim_str != yesterday_str and day == 1))) else ""
-        text += f"{mark}<b>День {day}:</b> {reward['desc']}\n"
+        text += f"<b>День {day}:</b> {reward['desc']}\n"
 
     text += f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n🔥 Ваша текущая серия: <b>{streak} дн.</b>\n{status_text}"
 
@@ -589,18 +507,12 @@ async def cb_daily_claim(callback: CallbackQuery):
     if last_claim_str == today_str:
         return await callback.answer("Вы уже забирали награду сегодня!", show_alert=True)
 
-    # Определение следующего дня серии
-    if last_claim_str == yesterday_str:
-        new_streak = streak + 1
-        if new_streak > 7:
-            new_streak = 1
-    else:
-        new_streak = 1
+    new_streak = (streak + 1) if last_claim_str == yesterday_str else 1
+    if new_streak > 7: new_streak = 1
 
     reward = DAILY_REWARDS_INFO[new_streak]
     reward_msg = ""
 
-    # VIP Бонус multiplier
     is_vip = await has_gamepass(user_id, "vip")
     shekel_mult = 1.5 if is_vip else 1.0
 
@@ -620,21 +532,261 @@ async def cb_daily_claim(callback: CallbackQuery):
                 await db.execute("UPDATE users SET shekels = shekels + ? WHERE user_id = ?", (fallback_shekels, user_id))
                 reward_msg = f"🪙 Не удалось выдать карту, компенсация: <b>{fallback_shekels} шекелей</b>!"
 
-        await db.execute(
-            "UPDATE users SET daily_streak = ?, last_daily_claim = ? WHERE user_id = ?",
-            (new_streak, today_str, user_id)
-        )
+        await db.execute("UPDATE users SET daily_streak = ?, last_daily_claim = ? WHERE user_id = ?", (new_streak, today_str, user_id))
         await db.commit()
 
-    await callback.answer("Награда успешно получена!", show_alert=False)
     await callback.message.edit_text(
         f"🎉 <b>НАГРАДА ЗА {new_streak} ДЕНЬ ПОЛУЧЕНА!</b>\n\n{reward_msg}\n\nВозвращайтесь завтра за следующей наградой!",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В главное меню", callback_data="menu_main")]])
     )
 
-# ==========================================
-# ДОНАТ МАГАЗИН И ОБМЕН
-# ==========================================
+@dp.callback_query(F.data == "menu_afk")
+async def cb_afk_menu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    now = datetime.utcnow()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT cards_json, duration_hours, start_time, end_time FROM afk_expeditions WHERE user_id = ?", (user_id,)) as cursor:
+            expedition = await cursor.fetchone()
+
+    if expedition:
+        cards_json, duration_h, start_str, end_str = expedition
+        end_time = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
+
+        if now >= end_time:
+            # Награда готова!
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🎁 Забрать награду!", callback_data="afk_claim_reward")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(
+                f"🎉 <b>AFK Экспедиция завершена!</b>\n"
+                f"Ваш отряд успешно вернулся из похода на <b>{duration_h} ч.</b>!\n"
+                f"Заберите заслуженные шекели и очки навыков!",
+                reply_markup=kb
+            )
+        else:
+            # Экспедиция ещё идёт
+            rem = end_time - now
+            rem_h, rem_m = rem.seconds // 3600, (rem.seconds % 3600) // 60
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Досрочно отменить", callback_data="afk_cancel")],
+                [InlineKeyboardButton(text="🔄 Обновить статус", callback_data="menu_afk")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")]
+            ])
+            await callback.message.edit_text(
+                f"⏳ <b>AFK Экспедиция в процессе...</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏱ Длительность: <b>{duration_h} часов</b>\n"
+                f"⏳ Осталось времени: <b>{rem_h} ч. {rem_m} мин.</b>\n\n"
+                f"<i>Пока идёт экспедиция, ваш отряд ищет сокровища!</i>",
+                reply_markup=kb
+            )
+    else:
+        is_vip = await has_gamepass(user_id, "vip")
+        max_afk_cards = 4 if is_vip else 3
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Собрать отряд и запустить", callback_data="afk_setup_cards")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")]
+        ])
+        await callback.message.edit_text(
+            f"⏳ <b>AFK ЭКСПЕДИЦИИ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Отправляйте юнитов в автоматические походы и получайте награды!\n\n"
+            f"• Слотов для карт: <b>{max_afk_cards} шт.</b> {'👑 (VIP)' if is_vip else '(Купите VIP для 4 слотов)'}\n"
+            f"• Варианты походов: <b>2, 4, 6, 10 или 24 часа</b>\n"
+            f"• Награды: <b>1 — 500 шекелей</b> 🪙 и <b>1 — 35 очков навыков</b> ✨ (в зависимости от силы отряда и времени)!",
+            reply_markup=kb
+        )
+
+@dp.callback_query(F.data == "afk_setup_cards")
+async def cb_afk_setup_cards(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    is_vip = await has_gamepass(user_id, "vip")
+    max_slots = 4 if is_vip else 3
+
+    # Выбираем доступные карты
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT i.item_id, c.name, i.mutation, c.rarity, c.damage, c.hp
+            FROM inventory i JOIN cards c ON i.card_id = c.card_id
+            WHERE i.user_id = ? LIMIT 20
+        """, (user_id,)) as cursor:
+            items = await cursor.fetchall()
+
+    if not items:
+        return await callback.answer("У вас нет карт для отправки в экспедицию!", show_alert=True)
+
+    await state.update_data(selected_cards=[], max_slots=max_slots)
+    await state.set_state(AFKState.selecting_cards)
+
+    kb = []
+    for item in items:
+        mut = MUTATIONS.get(item[2], MUTATIONS["Normal"])["name"]
+        kb.append([InlineKeyboardButton(text=f"▫️ {mut} {item[1]} [{item[3]}] (⚔️{item[4]} ❤️{item[5]})", callback_data=f"afk_toggle:{item[0]}")])
+
+    kb.append([InlineKeyboardButton(text="❌ Отмена", callback_data="menu_afk")])
+
+    await callback.message.edit_text(
+        f"⏳ Выберите карты в отряд (Выбрано: <b>0/{max_slots}</b>):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
+@dp.callback_query(AFKState.selecting_cards, F.data.startswith("afk_toggle:"))
+async def cb_afk_toggle_card(callback: CallbackQuery, state: FSMContext):
+    item_id = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    selected = data.get("selected_cards", [])
+    max_slots = data.get("max_slots", 3)
+
+    if item_id in selected:
+        selected.remove(item_id)
+    else:
+        if len(selected) >= max_slots:
+            return await callback.answer(f"Максимум карт в отряде: {max_slots}!", show_alert=True)
+        selected.append(item_id)
+
+    await state.update_data(selected_cards=selected)
+
+    user_id = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT i.item_id, c.name, i.mutation, c.rarity, c.damage, c.hp
+            FROM inventory i JOIN cards c ON i.card_id = c.card_id
+            WHERE i.user_id = ? LIMIT 20
+        """, (user_id,)) as cursor:
+            items = await cursor.fetchall()
+
+    kb = []
+    for item in items:
+        icon = "☑️" if item[0] in selected else "▫️"
+        mut = MUTATIONS.get(item[2], MUTATIONS["Normal"])["name"]
+        kb.append([InlineKeyboardButton(text=f"{icon} {mut} {item[1]} [{item[3]}]", callback_data=f"afk_toggle:{item[0]}")])
+
+    if selected:
+        kb.append([InlineKeyboardButton(text="✅ Подтвердить отряд ➡️", callback_data="afk_choose_time")])
+    kb.append([InlineKeyboardButton(text="❌ Отмена", callback_data="menu_afk")])
+
+    await callback.message.edit_text(
+        f"⏳ Выберите карты в отряд (Выбрано: <b>{len(selected)}/{max_slots}</b>):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
+@dp.callback_query(AFKState.selecting_cards, F.data == "afk_choose_time")
+async def cb_afk_choose_time(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("selected_cards", [])
+
+    if not selected:
+        return await callback.answer("Выберите хотя бы одну карту!", show_alert=True)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏱ 2 Часа", callback_data="afk_start_exp:2"), InlineKeyboardButton(text="⏱ 4 Часа", callback_data="afk_start_exp:4")],
+        [InlineKeyboardButton(text="⏱ 6 Часов", callback_data="afk_start_exp:6"), InlineKeyboardButton(text="⏱ 10 Часов", callback_data="afk_start_exp:10")],
+        [InlineKeyboardButton(text="🌟 24 Часа (Макс. награды)", callback_data="afk_start_exp:24")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="afk_setup_cards")]
+    ])
+
+    await callback.message.edit_text("⏱ Выберите время экспедиции:", reply_markup=kb)
+
+@dp.callback_query(AFKState.selecting_cards, F.data.startswith("afk_start_exp:"))
+async def cb_afk_start_expedition(callback: CallbackQuery, state: FSMContext):
+    hours = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    selected = data.get("selected_cards", [])
+    user_id = callback.from_user.id
+
+    start_time = datetime.utcnow()
+    end_time = start_time + timedelta(hours=hours)
+
+    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO afk_expeditions (user_id, cards_json, duration_hours, start_time, end_time, claimed)
+            VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(user_id) DO UPDATE SET
+            cards_json=excluded.cards_json, duration_hours=excluded.duration_hours,
+            start_time=excluded.start_time, end_time=excluded.end_time, claimed=0
+        """, (user_id, json.dumps(selected), hours, start_str, end_str))
+        await db.commit()
+
+    await state.clear()
+    await callback.message.edit_text(
+        f"🚀 <b>ОТРЯД ОТПРАВЛЕН В ЭКСПЕДИЦИЮ!</b>\n\n"
+        f"⏱ Время: <b>{hours} часов</b>\n"
+        f"🎴 Карты в отряде: <b>{len(selected)} шт.</b>\n\n"
+        f"Возвращайтесь через {hours} ч., чтобы забрать сокровища!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К меню AFK", callback_data="menu_afk")]])
+    )
+
+@dp.callback_query(F.data == "afk_claim_reward")
+async def cb_afk_claim_reward(callback: CallbackQuery):
+    user_id = callback.from_user.id
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT cards_json, duration_hours, end_time FROM afk_expeditions WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return await callback.answer("У вас нет активной экспедиции!")
+
+        cards_json, duration_h, end_str = row
+        card_ids = json.loads(cards_json)
+
+        # Считаем силу отряда
+        total_power = 0
+        if card_ids:
+            placeholders = ",".join(["?"] * len(card_ids))
+            async with db.execute(f"SELECT c.damage, c.hp FROM inventory i JOIN cards c ON i.card_id = c.card_id WHERE i.item_id IN ({placeholders})", card_ids) as cursor:
+                for r in await cursor.fetchall():
+                    total_power += r[0] + (r[1] // 5)
+
+        # Расчет наград (от 1 до 500 шекелей, от 1 до 35 очков навыков)
+        time_ratio = min(1.0, duration_h / 24.0)
+        power_ratio = min(1.0, total_power / 300.0)
+        combined_factor = (time_ratio * 0.6) + (power_ratio * 0.4)
+
+        shekels_won = max(1, min(500, int(1 + combined_factor * 499)))
+        skills_won = max(1, min(35, int(1 + combined_factor * 34)))
+
+        is_vip = await has_gamepass(user_id, "vip")
+        if is_vip:
+            shekels_won = int(shekels_won * 1.5)
+
+        has_x2_shek = await has_gamepass(user_id, "x2_shekels")
+        if has_x2_shek:
+            shekels_won *= 2
+
+        has_x2_sk = await has_gamepass(user_id, "x2_skills")
+        if has_x2_sk:
+            skills_won *= 2
+
+        # Начисляем награды
+        await db.execute("UPDATE users SET shekels = shekels + ? WHERE user_id = ?", (shekels_won, user_id))
+        await db.execute("INSERT INTO skills (user_id, points) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET points = points + ?", (user_id, skills_won, skills_won))
+        await db.execute("DELETE FROM afk_expeditions WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+    await callback.message.edit_text(
+        f"🎉 <b>ЭКСПЕДИЦИЯ УСПЕШНО ЗАВЕРШЕНА!</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Ваш отряд добыл трофеи:\n"
+        f"🪙 <b>+{shekels_won} Шекелей</b>\n"
+        f"✨ <b>+{skills_won} Очков навыков</b>\n",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В главное меню", callback_data="menu_main")]])
+    )
+
+@dp.callback_query(F.data == "afk_cancel")
+async def cb_afk_cancel(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM afk_expeditions WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+    await callback.answer("Экспедиция досрочно отменена. Награды сгорели.", show_alert=True)
+    await cb_afk_menu(callback)
+
 @dp.message(Command("donate"))
 async def cmd_donate(message: types.Message):
     await message.answer("💎 <b>ДОНАТ МАГАЗИН</b>\nВыберите нужный раздел:", reply_markup=donate_main_kb())
@@ -643,7 +795,6 @@ async def cmd_donate(message: types.Message):
 async def cb_donate_menu(callback: CallbackQuery):
     await callback.message.edit_text("💎 <b>ДОНАТ МАГАЗИН</b>\nВыберите нужный раздел:", reply_markup=donate_main_kb())
 
-# Обмен Шекели -> Робуксы
 @dp.callback_query(F.data == "donate_exchange")
 async def cb_exchange_start(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -689,7 +840,6 @@ async def process_exchange_amount(message: types.Message, state: FSMContext):
         reply_markup=donate_main_kb()
     )
 
-# Отображение F2P магазина (Робуксы)
 @dp.callback_query(F.data == "donate_f2p")
 async def cb_donate_f2p(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -710,7 +860,6 @@ async def cb_donate_f2p(callback: CallbackQuery):
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_donate")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# Отображение P2W магазина (Telegram Stars)
 @dp.callback_query(F.data == "donate_p2w")
 async def cb_donate_p2w(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -729,7 +878,6 @@ async def cb_donate_p2w(callback: CallbackQuery):
     kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_donate")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-# Выбор способ покупки (себе или в подарок)
 @dp.callback_query(F.data.startswith("buy_f2p:") | F.data.startswith("buy_p2w:"))
 async def cb_buy_select_mode(callback: CallbackQuery):
     parts = callback.data.split(":")
@@ -751,9 +899,6 @@ async def cb_buy_select_mode(callback: CallbackQuery):
         reply_markup=kb
     )
 
-# ==========================================
-# ОБРАБОТКА ПОКУПОК И ПОДАРКОВ
-# ==========================================
 @dp.callback_query(F.data.startswith("proc_buy:"))
 async def cb_process_buy(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split(":")
@@ -769,9 +914,7 @@ async def cb_process_buy(callback: CallbackQuery, state: FSMContext):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="menu_donate")]])
         )
 
-    # Покупка себе
     if mode == "buy_f2p":
-        # За Робуксы
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT robux FROM users WHERE user_id = ?", (user_id,)) as cursor:
                 robux = (await cursor.fetchone())[0]
@@ -786,7 +929,6 @@ async def cb_process_buy(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(f"🎉 Вы успешно купили геймпасс <b>{gp['title']}</b>!", reply_markup=donate_main_kb())
 
     elif mode == "buy_p2w":
-        # За Telegram Stars
         prices = [LabeledPrice(label=gp["title"], amount=gp["stars"])]
         payload = f"self:{gp_id}:{user_id}"
 
@@ -809,7 +951,6 @@ async def process_gift_target(message: types.Message, state: FSMContext):
     gp = GAMEPASSES[gp_id]
     buyer_id = message.from_user.id
 
-    # Поиск получателя
     async with aiosqlite.connect(DB_PATH) as db:
         if target_input.isdigit():
             async with db.execute("SELECT user_id, username FROM users WHERE user_id = ?", (int(target_input),)) as cursor:
@@ -820,17 +961,15 @@ async def process_gift_target(message: types.Message, state: FSMContext):
 
     if not target_row:
         await state.clear()
-        return await message.answer("❌ Пользователь не найден в базе данных бота! Игрок должен хотя бы раз запустить бота.", reply_markup=donate_main_kb())
+        return await message.answer("❌ Пользователь не найден в базе данных бота!", reply_markup=donate_main_kb())
 
     target_id, target_name = target_row[0], target_row[1]
 
-    # Проверка наличия у него геймпасса
     if await has_gamepass(target_id, gp_id):
         await state.clear()
-        return await message.answer(f"❌ У игрока <b>{target_name}</b> уже есть геймпасс {gp['title']}!", reply_markup=donate_main_kb())
+        return await message.answer(f"❌ У игрока <b>{target_name}</b> уже есть этот геймпасс!", reply_markup=donate_main_kb())
 
     if mode == "buy_f2p":
-        # Оплата Робуксами
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT robux FROM users WHERE user_id = ?", (buyer_id,)) as cursor:
                 robux = (await cursor.fetchone())[0]
@@ -848,7 +987,6 @@ async def process_gift_target(message: types.Message, state: FSMContext):
         buyer_name = message.from_user.username or message.from_user.first_name
         await message.answer(f"🎁 Вы успешно подарили <b>{gp['title']}</b> игроку <b>{target_name}</b>!", reply_markup=donate_main_kb())
 
-        # Красивое сообщение получателю
         try:
             gift_card_text = (
                 f"🎉 <b>ВАМ ПОСТУПИЛ ПОДАРОК!</b> 🎉\n"
@@ -864,7 +1002,6 @@ async def process_gift_target(message: types.Message, state: FSMContext):
             pass
 
     elif mode == "buy_p2w":
-        # Инвойс Stars для подарка
         prices = [LabeledPrice(label=f"Подарок: {gp['title']}", amount=gp["stars"])]
         payload = f"gift:{gp_id}:{target_id}:{buyer_id}"
 
@@ -919,9 +1056,6 @@ async def process_successful_payment(message: Message):
         except Exception:
             pass
 
-# ==========================================
-# ИНВЕНТАРЬ И ЭКИПИРОВКА
-# ==========================================
 @dp.callback_query(F.data.startswith("menu_inventory"))
 async def cb_inventory(callback: CallbackQuery):
     page = 0
@@ -995,7 +1129,7 @@ async def cb_equip_select_slot(callback: CallbackQuery):
             items = await cursor.fetchall()
 
     kb = []
-    for item in items[:15]:  # Показываем первые 15 доступных карт
+    for item in items[:15]:
         mut = MUTATIONS.get(item[2], MUTATIONS["Normal"])["name"]
         kb.append([InlineKeyboardButton(text=f"{mut} {item[1]} [{item[3]}]", callback_data=f"set_equip:{item[0]}:{slot}")])
 
@@ -1009,9 +1143,7 @@ async def cb_set_equip(callback: CallbackQuery):
     user_id = callback.from_user.id
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # Снимаем старую карту с этого слота
         await db.execute("UPDATE inventory SET is_equipped = 0, equip_slot = 0 WHERE user_id = ? AND equip_slot = ?", (user_id, slot))
-        # Назначаем новую
         await db.execute("UPDATE inventory SET is_equipped = 1, equip_slot = ? WHERE item_id = ? AND user_id = ?", (slot, item_id, user_id))
         await db.commit()
 
@@ -1028,9 +1160,6 @@ async def cb_equip_clear(callback: CallbackQuery):
     await callback.answer("Вся экипировка снята!")
     await cb_equipment(callback)
 
-# ==========================================
-# ОЧКИ НАВЫКОВ (УЛУЧШЕННОЕ И ИСПРАВЛЕННОЕ)
-# ==========================================
 @dp.callback_query(F.data == "menu_skills")
 async def cb_skills_menu(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -1041,7 +1170,7 @@ async def cb_skills_menu(callback: CallbackQuery):
             pts = row[0] if row else 0
 
     if pts == 0:
-        return await callback.answer("У вас нет свободных очков навыков! Сражайтесь на арене, чтобы получить их.", show_alert=True)
+        return await callback.answer("У вас нет свободных очков навыков! Сражайтесь на арене или отправляйте отряды в AFK-экспедиции.", show_alert=True)
 
     kb = []
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1121,9 +1250,6 @@ async def cb_add_skill(callback: CallbackQuery):
     await callback.answer(f"Успешно добавлено +{amount}!")
     await cb_skill_show(callback)
 
-# ==========================================
-# БОЕВАЯ СИСТЕМА И АРЕНА
-# ==========================================
 @dp.callback_query(F.data == "menu_battle")
 async def cb_battle_menu(callback: CallbackQuery):
     await callback.message.edit_text("⚔️ Выберите сложность соперника на Арене:", reply_markup=battle_difficulty_kb())
@@ -1133,12 +1259,10 @@ async def process_battle(callback: CallbackQuery):
     difficulty = callback.data.split("_")[2]
     user_id = callback.from_user.id
 
-    # Загрузка геймпасов
     has_x2_shekels = await has_gamepass(user_id, "x2_shekels")
     has_x2_skills = await has_gamepass(user_id, "x2_skills")
     is_vip = await has_gamepass(user_id, "vip")
 
-    # Сбор команды игрока
     team_player = []
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("""
@@ -1163,12 +1287,11 @@ async def process_battle(callback: CallbackQuery):
                 })
 
     if not team_player:
-        return await callback.answer("У вас нет экипированных карт! Перейдите в '🛡 Экипировка' и добавьте юнитов.", show_alert=True)
+        return await callback.answer("У вас нет экипированных карт!", show_alert=True)
 
     await callback.message.edit_text("⏳ Поиск соперника и симуляция боя...")
     await asyncio.sleep(2)
 
-    # Генерация команды ИИ
     stats = await get_user_stats(user_id)
     rank = get_rank_by_trophies(stats[2])
 
@@ -1186,7 +1309,6 @@ async def process_battle(callback: CallbackQuery):
                     "cld": r[3], "class": r[4], "next_attack": r[3], "owner": "ai"
                 })
 
-    # Автосимуляция боя
     log = []
     time_passed = 0.0
     max_time = 60.0
@@ -1226,7 +1348,6 @@ async def process_battle(callback: CallbackQuery):
 
     player_won = any(u["hp"] > 0 for u in team_player)
 
-    # Награды
     r_data = RANKS[rank]
     base_trop = random.randint(r_data["trophies"][0], r_data["trophies"][1])
     base_shek = random.randint(r_data["shekels"][0], r_data["shekels"][1])
@@ -1238,7 +1359,6 @@ async def process_battle(callback: CallbackQuery):
     elif difficulty == "nightmare":
         base_trop = int(base_trop * 1.8)
 
-    # Применение множителей геймпасов
     shekel_multiplier = 1.0
     if has_x2_shekels:
         shekel_multiplier *= 2.0
@@ -1247,7 +1367,6 @@ async def process_battle(callback: CallbackQuery):
 
     base_shek = int(base_shek * shekel_multiplier)
 
-    # Очки навыков
     sp_chance = 0.2 + (0.05 if is_vip else 0.0)
     skill_pts = 0
     if random.random() < sp_chance:
@@ -1284,9 +1403,6 @@ async def process_battle(callback: CallbackQuery):
 
     await callback.message.edit_text(msg_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="menu_main")]]))
 
-# ==========================================
-# ИНДЕКС КАРТ И КРЕЙТЫ
-# ==========================================
 @dp.callback_query(F.data.startswith("menu_index"))
 async def cb_index(callback: CallbackQuery):
     page = 0
@@ -1370,9 +1486,6 @@ async def cb_buy_crate(callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад к крейтам", callback_data="menu_crates")]])
         )
 
-# ==========================================
-# АДМИН ПАНЕЛЬ
-# ==========================================
 @dp.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -1461,13 +1574,10 @@ async def create_card_cld(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Карта <b>{data['name']}</b> успешно добавлена в игру!", reply_markup=admin_panel_kb())
 
-# ==========================================
-# ОСНОВНОЙ ВЕБ-ПРИЛОЖЕНИЯ
-# ==========================================
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
-    logging.info("База данных успешно инициализирована. Запуск бота...")
+    logging.info("База данных инициализирована. Запуск бота...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
