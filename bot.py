@@ -18,8 +18,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # ----------------- КОНФИГУРАЦИЯ И КОНСТАНТЫ -----------------
 # Вставь сюда токен своего бота
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-MAIN_ADMIN_ID = 123456789  # Замени на свой Telegram ID
+BOT_TOKEN = "8949953502:AAGwrEWWVST3yXRNA57yLWl8RXDdmr9WRQs"
+MAIN_ADMIN_ID = 5341904332  # Замени на свой Telegram ID
 
 DB_FILE = "gamedata.db"
 
